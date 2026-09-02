@@ -15,11 +15,12 @@ Task Scheduler registration is a separate explicit command and has not been perf
 
 The policy is:
 
-1. A quota is eligible only when its reported used percentage is greater than zero.
-2. Each quota window is kicked at most once per observed window.
-3. A successful warmup marks all currently observed windows in the same provider/model group, because one request consumes the applicable group’s windows together.
-4. A reset is detected from a changed reset timestamp or a significant drop in observed usage. This works for GLM responses that do not provide a reset timestamp.
-5. Unknown quota status never causes an automatic live request.
+1. A quota is eligible when its reported usage is greater than zero or the provider exposes exact current-window activity despite a rounded `0%` display.
+2. Antigravity uses its fractional usage, GLM uses its five-hour model-call/token feed, and Codex supplements rounded account percentages with local thread activity aligned to the provider's reset boundary.
+3. Each quota window is attempted at most once per observed window. Attempt state is written before the request, preventing retries after ambiguous timeouts.
+4. A successful warmup marks all currently observed windows in the same provider/model group, because one request consumes the applicable group's windows together.
+5. Reset state is cleared only when the provider window changes, usage drops as part of a reset, or exact current-window activity expires.
+6. Unknown quota status never causes an automatic live request, and a single-instance lock prevents overlapping live runs.
 
 Antigravity currently reports two windows per model group: `weekly` and `5h`. The tool keeps those as separate state keys. It chooses the lowest configured available model and effort in each group: normally Gemini Flash Low for Gemini, and GPT-OSS Medium for the Claude/GPT group because that is the lowest advertised option in that group. If the installed CLI reports a different catalog, selection falls back to the lowest-ranked discovered model.
 
@@ -35,7 +36,7 @@ Create a local config only if you need overrides:
 Copy-Item .\config.example.json .\config.json
 ```
 
-For GLM, put the coding-plan key in one of the configured environment variables (`GLM_API_KEY`, `ZAI_API_KEY`, `ZAI_CODING_PLAN_API_KEY`, or `ZAI_API_TOKEN`). The key is never written to the config, state, or log.
+For GLM, expose the Agent Vault credential reference through one of the configured environment variables (`GLM_API_KEY`, `ZAI_API_KEY`, `ZAI_CODING_PLAN_API_KEY`, or `ZAI_API_TOKEN`). The real key is never written to the config, state, or log.
 
 ## Commands
 
@@ -56,6 +57,8 @@ When ready to register scheduling explicitly:
 ```powershell
 python .\quota_warmup.py install-task --name "Quota Warmup" --every-minutes 15
 ```
+
+The scheduled task must run as the same Windows user that owns the Codex, Antigravity, and Agent Vault sessions. Agent Vault must be running so GLM requests can resolve the credential reference.
 
 To remove that task:
 
