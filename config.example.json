@@ -16,6 +16,7 @@
     "antigravity": {
       "enabled": true,
       "binary": "",
+      "isolated_profile_dir": "",
       "usage_timeout_seconds": 45,
       "warm_timeout_seconds": 180,
       "warm_prompt": "Reply with exactly: OK",

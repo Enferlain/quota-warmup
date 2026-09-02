@@ -36,6 +36,15 @@ class SchedulerTests(unittest.TestCase):
     def test_tiny_nonzero_usage_is_not_displayed_as_zero(self):
         self.assertEqual(format_percent(0.0003), "<0.1%")
 
+    def test_antigravity_isolated_environment_has_no_mcp_servers(self):
+        with TemporaryDirectory() as directory:
+            provider = AntigravityProvider({"isolated_profile_dir": directory})
+            environment = provider.isolated_environment()
+            mcp_config = Path(directory) / ".gemini" / "config" / "mcp_config.json"
+            self.assertEqual(environment["USERPROFILE"], str(Path(directory).resolve()))
+            self.assertEqual(environment["HOME"], str(Path(directory).resolve()))
+            self.assertEqual(mcp_config.read_text(encoding="utf-8").strip(), '{\n  "mcpServers": {}\n}')
+
 
 class ParsingTests(unittest.TestCase):
     def test_antigravity_tracks_both_windows_for_both_groups(self):

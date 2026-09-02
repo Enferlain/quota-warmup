@@ -30,12 +30,22 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 PROJECT_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = PROJECT_DIR / "config.json"
 DEFAULT_STATE = PROJECT_DIR / "state.json"
 DEFAULT_LOG = PROJECT_DIR / "runs.jsonl"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def hidden_subprocess_options() -> dict[str, Any]:
+    options: dict[str, Any] = {"creationflags": NO_WINDOW}
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+        options["startupinfo"] = startupinfo
+    return options
 
 
 def utc_now() -> datetime:
@@ -133,7 +143,12 @@ def executable_parts(value: str | Sequence[str] | None, fallback: str) -> list[s
     return parts
 
 
-def run_command(command: Sequence[str], cwd: Path, timeout: float) -> subprocess.CompletedProcess[str]:
+def run_command(
+    command: Sequence[str],
+    cwd: Path,
+    timeout: float,
+    environment: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             list(command),
@@ -144,7 +159,8 @@ def run_command(command: Sequence[str], cwd: Path, timeout: float) -> subprocess
             errors="replace",
             timeout=timeout,
             check=False,
-            creationflags=NO_WINDOW,
+            env=dict(environment) if environment is not None else None,
+            **hidden_subprocess_options(),
         )
     except FileNotFoundError as exc:
         raise RuntimeError(f"Executable not found: {command[0]}") from exc
@@ -344,7 +360,17 @@ class AntigravityProvider(Provider):
             "agy",
         )
         self.binary = executable_parts(config.get("binary") or fallback, "agy")
+        configured_profile = config.get("isolated_profile_dir")
+        self.profile_dir = Path(str(configured_profile)).expanduser().resolve() if configured_profile else PROJECT_DIR / ".agy-quota-profile"
         self.last_models: list[str] = []
+
+    def isolated_environment(self) -> dict[str, str]:
+        mcp_config = self.profile_dir / ".gemini" / "config" / "mcp_config.json"
+        save_json_file(mcp_config, {"mcpServers": {}})
+        environment = os.environ.copy()
+        environment["USERPROFILE"] = str(self.profile_dir)
+        environment["HOME"] = str(self.profile_dir)
+        return environment
 
     @staticmethod
     def group_name(name: str) -> str:
@@ -376,7 +402,7 @@ class AntigravityProvider(Provider):
             f"{int(timeout)}s",
         ]
         try:
-            result = run_command(command, PROJECT_DIR, timeout + 5)
+            result = run_command(command, self.profile_dir, timeout + 5, self.isolated_environment())
             if result.returncode != 0:
                 detail = (result.stderr or result.stdout).strip().splitlines()
                 raise RuntimeError(detail[-1] if detail else f"exit code {result.returncode}")
@@ -396,7 +422,7 @@ class AntigravityProvider(Provider):
     def discover_models(self) -> list[str]:
         timeout = float(self.config.get("usage_timeout_seconds", 45))
         try:
-            result = run_command([*self.binary, "models"], PROJECT_DIR, timeout)
+            result = run_command([*self.binary, "models"], self.profile_dir, timeout, self.isolated_environment())
         except RuntimeError:
             return []
         if result.returncode != 0:
@@ -458,7 +484,7 @@ class AntigravityProvider(Provider):
             "--print-timeout",
             f"{int(timeout)}s",
         ]
-        result = run_command(command, PROJECT_DIR, timeout + 5)
+        result = run_command(command, self.profile_dir, timeout + 5, self.isolated_environment())
         if result.returncode != 0:
             detail = (result.stderr or result.stdout).strip().splitlines()
             raise RuntimeError(detail[-1] if detail else f"exit code {result.returncode}")
@@ -549,8 +575,13 @@ class CodexProvider(Provider):
     def __init__(self, config: Mapping[str, Any]):
         super().__init__(config)
         local_app_data = Path(os.environ.get("LOCALAPPDATA", ""))
+        native_candidates = sorted(
+            (local_app_data / "OpenAI" / "Codex" / "bin").glob("*/codex.exe"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
         fallback = find_first_existing(
-            [local_app_data / "pnpm" / "bin" / "codex.CMD", local_app_data / "pnpm" / "bin" / "codex.ps1"],
+            [*native_candidates, local_app_data / "pnpm" / "bin" / "codex.CMD", local_app_data / "pnpm" / "bin" / "codex.ps1"],
             "codex",
         )
         self.binary = executable_parts(config.get("binary") or fallback, "codex")
@@ -569,7 +600,7 @@ class CodexProvider(Provider):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                creationflags=NO_WINDOW,
+                **hidden_subprocess_options(),
             )
         except FileNotFoundError as exc:
             raise RuntimeError(f"Executable not found: {command[0]}") from exc

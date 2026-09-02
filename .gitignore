@@ -2,5 +2,6 @@ config.json
 state.json
 runs.jsonl
 *.lock
+.agy-quota-profile/
 __pycache__/
 *.pyc

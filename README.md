@@ -24,11 +24,13 @@ The policy is:
 
 Antigravity currently reports two windows per model group: `weekly` and `5h`. The tool keeps those as separate state keys. It chooses the lowest configured available model and effort in each group: normally Gemini Flash Low for Gemini, and GPT-OSS Medium for the Claude/GPT group because that is the lowest advertised option in that group. If the installed CLI reports a different catalog, selection falls back to the lowest-ranked discovered model.
 
+Antigravity commands run with a dedicated `.agy-quota-profile` runtime directory. The existing secure cached login remains available, but the normal AGY profile and its MCP servers are not loaded. This prevents unrelated MCP processes and terminal windows from starting during scheduled quota checks. The runtime directory is ignored by Git and contains no copied credentials.
+
 Codex’s app-server can expose primary and secondary rate-limit buckets when the account backend provides them. If Codex returns no rate limits, use the explicit `--force-provider codex` option for a manual warmup; automatic mode skips it.
 
 ## Setup
 
-The Antigravity CLI is expected at `%LOCALAPPDATA%\agy\bin\agy.exe`; the tool also accepts `agy` on PATH. Codex is expected at `%LOCALAPPDATA%\pnpm\bin\codex.ps1`; the tool also accepts `codex` on PATH.
+The Antigravity CLI is expected at `%LOCALAPPDATA%\agy\bin\agy.exe`; the tool also accepts `agy` on PATH. Codex prefers the native executable installed with the Codex app, then falls back to the pnpm launcher or `codex` on PATH. Avoiding the `.CMD` wrapper also prevents a transient Windows console from appearing during scheduled checks.
 
 Create a local config only if you need overrides:
 
