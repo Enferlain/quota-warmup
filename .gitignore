@@ -1,5 +1,6 @@
 config.json
 state.json
 runs.jsonl
+*.lock
 __pycache__/
 *.pyc

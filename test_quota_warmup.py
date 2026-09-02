@@ -1,16 +1,35 @@
 import unittest
 from datetime import datetime
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from quota_warmup import (
     AntigravityProvider,
     Quota,
     activity_cutoff_ms,
+    background_python_executable,
     parse_antigravity_usage,
     parse_codex_rate_limits,
     parse_glm_quotas,
     due_quotas,
     state_bucket,
 )
+
+
+class SchedulerTests(unittest.TestCase):
+    def test_background_python_uses_pythonw_when_available(self):
+        with TemporaryDirectory() as directory:
+            python = Path(directory) / "python.exe"
+            pythonw = Path(directory) / "pythonw.exe"
+            python.touch()
+            pythonw.touch()
+            self.assertEqual(background_python_executable(python), pythonw.resolve())
+
+    def test_background_python_falls_back_to_console_executable(self):
+        with TemporaryDirectory() as directory:
+            python = Path(directory) / "python.exe"
+            python.touch()
+            self.assertEqual(background_python_executable(python), python.resolve())
 
 
 class ParsingTests(unittest.TestCase):

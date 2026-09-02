@@ -35,6 +35,7 @@ PROJECT_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = PROJECT_DIR / "config.json"
 DEFAULT_STATE = PROJECT_DIR / "state.json"
 DEFAULT_LOG = PROJECT_DIR / "runs.jsonl"
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def utc_now() -> datetime:
@@ -143,6 +144,7 @@ def run_command(command: Sequence[str], cwd: Path, timeout: float) -> subprocess
             errors="replace",
             timeout=timeout,
             check=False,
+            creationflags=NO_WINDOW,
         )
     except FileNotFoundError as exc:
         raise RuntimeError(f"Executable not found: {command[0]}") from exc
@@ -567,6 +569,7 @@ class CodexProvider(Provider):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                creationflags=NO_WINDOW,
             )
         except FileNotFoundError as exc:
             raise RuntimeError(f"Executable not found: {command[0]}") from exc
@@ -1255,8 +1258,14 @@ def run_once(
     return 0 if all(outcome["success"] for outcome in outcomes) else 1
 
 
+def background_python_executable(executable: str | Path | None = None) -> Path:
+    python = Path(executable or sys.executable).resolve()
+    pythonw = python.with_name("pythonw.exe")
+    return pythonw if pythonw.exists() else python
+
+
 def scheduler_command(name: str, every_minutes: int) -> list[str]:
-    python = Path(sys.executable).resolve()
+    python = background_python_executable()
     script = Path(__file__).resolve()
     task_action = f'"{python}" "{script}" run --live'
     return ["schtasks.exe", "/Create", "/TN", name, "/SC", "MINUTE", "/MO", str(every_minutes), "/TR", task_action, "/F"]
