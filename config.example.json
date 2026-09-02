@@ -1,0 +1,59 @@
+{
+  "policy": {
+    "trigger_min_used_fraction": 0.0,
+    "state_reset_drop_fraction": 0.02
+  },
+  "providers": {
+    "codex": {
+      "enabled": true,
+      "binary": "",
+      "model": "",
+      "effort": "low",
+      "assume_used": false,
+      "timeout_seconds": 45,
+      "warm_prompt": "Reply with exactly: OK"
+    },
+    "antigravity": {
+      "enabled": true,
+      "binary": "",
+      "usage_timeout_seconds": 45,
+      "warm_timeout_seconds": 180,
+      "warm_prompt": "Reply with exactly: OK",
+      "model_preferences": {
+        "gemini": [
+          "gemini-3.5-flash-low",
+          "gemini-3.6-flash-low",
+          "gemini-3.7-flash-low",
+          "gemini-3.5-flash-medium",
+          "gemini-3.6-flash-medium",
+          "gemini-3.7-flash-medium"
+        ],
+        "third_party": [
+          "gpt-oss-120b-medium",
+          "claude-sonnet-4-6",
+          "claude-opus-4-6-thinking"
+        ]
+      }
+    },
+    "glm": {
+      "enabled": true,
+      "api_key_env": [
+        "GLM_API_KEY",
+        "ZAI_API_KEY",
+        "ZAI_CODING_PLAN_API_KEY",
+        "ZAI_API_TOKEN"
+      ],
+      "usage_url": "https://api.z.ai/api/monitor/usage",
+      "legacy_usage_url": "https://api.z.ai/api/monitor/usage/quota/limit",
+      "usage_auth_mode": "bearer",
+      "usage_auth_fallback_to_raw": true,
+      "request_base_url": "https://api.z.ai/api/coding/paas/v4",
+      "request_auth_mode": "bearer",
+      "model": "glm-5.3-flash",
+      "reasoning_effort": "low",
+      "max_tokens": 1,
+      "timeout_seconds": 45,
+      "warm_prompt": "Reply with exactly: OK"
+    }
+  }
+}
