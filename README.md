@@ -11,7 +11,7 @@ This is not a Codex plugin and does not use Hermes.
 ## Safety behavior
 
 `status` and `run` are read-only by default. A model request requires `run --live`.
-Task Scheduler registration is a separate explicit command and has not been performed by this project setup.
+Task Scheduler registration is a separate explicit command.
 
 The policy is:
 
@@ -48,15 +48,18 @@ python .\quota_warmup.py status --provider antigravity --json
 python .\quota_warmup.py run
 python .\quota_warmup.py run --live
 python .\quota_warmup.py run --force-provider codex --live
+python .\quota_warmup.py logs --last 20
 ```
 
-The first `run` is a dry-run. The live command writes `state.json` and appends `runs.jsonl`.
+The first `run` is a dry-run. Every live scheduler check appends `runs.jsonl`, including no-op checks, unavailable providers, overlapping-run skips, and failures. `logs` renders the JSONL as a readable audit showing every quota value and why it warmed, skipped, or was ignored.
 
 When ready to register scheduling explicitly:
 
 ```powershell
-python .\quota_warmup.py install-task --name "Quota Warmup" --every-minutes 15
+python .\quota_warmup.py install-task --name "Quota Warmup" --every-minutes 60
 ```
+
+An hourly check is normally enough for a five-hour quota window and limits the delay after a reset to at most about one hour. A 15-minute schedule is also safe—the tool still checks quota first and its state hold prevents repeated warmup requests—but it performs four times as many read-only quota checks.
 
 The scheduled task must run as the same Windows user that owns the Codex, Antigravity, and Agent Vault sessions. Agent Vault must be running so GLM requests can resolve the credential reference.
 

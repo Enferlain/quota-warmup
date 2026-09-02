@@ -11,7 +11,9 @@ from quota_warmup import (
     parse_antigravity_usage,
     parse_codex_rate_limits,
     parse_glm_quotas,
+    quota_decision,
     due_quotas,
+    format_percent,
     state_bucket,
 )
 
@@ -30,6 +32,9 @@ class SchedulerTests(unittest.TestCase):
             python = Path(directory) / "python.exe"
             python.touch()
             self.assertEqual(background_python_executable(python), python.resolve())
+
+    def test_tiny_nonzero_usage_is_not_displayed_as_zero(self):
+        self.assertEqual(format_percent(0.0003), "<0.1%")
 
 
 class ParsingTests(unittest.TestCase):
@@ -87,6 +92,10 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(quotas[0].window, "5h")
         self.assertAlmostEqual(quotas[0].used_fraction, 0.35)
 
+    def test_glm_one_percent_is_not_interpreted_as_full_usage(self):
+        quotas = parse_glm_quotas({"data": {"limits": [{"type": "TOKENS_LIMIT", "unit": 3, "number": 5, "percentage": 1}]}})
+        self.assertAlmostEqual(quotas[0].used_fraction, 0.01)
+
     def test_glm_monthly_mcp_limit_is_not_warmable(self):
         quotas = parse_glm_quotas({"data": {"limits": [{"type": "TIME_LIMIT", "unit": 5, "number": 1, "percentage": 20}, {"type": "TOKENS_LIMIT", "unit": 3, "number": 5, "percentage": 10}]}})
         self.assertEqual([quota.window for quota in quotas], ["5h"])
@@ -122,6 +131,12 @@ class StateTests(unittest.TestCase):
         quota = Quota("test", "test:5h", "test", "5h", 1.0)
         state = {"buckets": {"test:5h": {"attempted": True, "kicked": False, "last_used_fraction": 0.0, "hold_until": "2999-01-01T00:00:00Z"}}}
         self.assertEqual(due_quotas(state, [quota], 0.0, 0.02), [])
+
+    def test_unknown_usage_is_never_warmed(self):
+        quota = Quota("test", "test:5h", "test", "5h", None)
+        state = {"buckets": {}}
+        self.assertEqual(due_quotas(state, [quota], 0.0, 0.02), [])
+        self.assertEqual(quota_decision(state, quota, 0.0, 0.02)["reason"], "quota usage is unknown")
 
     def test_activity_cutoff_uses_provider_window_boundary(self):
         quota = Quota("test", "test:weekly", "test", "weekly", 1.0, "2026-09-07T00:00:00Z", metadata={"window_duration_mins": 10080})

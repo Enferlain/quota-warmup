@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 PROJECT_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = PROJECT_DIR / "config.json"
 DEFAULT_STATE = PROJECT_DIR / "state.json"
@@ -997,7 +997,10 @@ def parse_glm_quotas(payload: Any) -> list[Quota]:
         if not isinstance(item, Mapping):
             continue
         raw_percentage = item.get("percentage", item.get("usedPercent"))
-        used = as_fraction(raw_percentage)
+        try:
+            used = clamp_fraction(float(raw_percentage) / 100.0) if raw_percentage is not None else None
+        except (TypeError, ValueError):
+            used = None
         if used is None:
             continue
         limit_type = str(item.get("type", f"limit_{index}"))
@@ -1100,18 +1103,33 @@ def state_bucket(state: dict[str, Any], quota: Quota, reset_drop_fraction: float
     return entry
 
 
+def quota_decision(state: dict[str, Any], quota: Quota, threshold: float, reset_drop_fraction: float) -> dict[str, Any]:
+    decision = {
+        "provider": quota.provider,
+        "group": quota.group,
+        "quota_id": quota.quota_id,
+        "window": quota.window,
+        "used_fraction": quota.used_fraction,
+        "reset_time": quota.reset_time,
+        "activity_detected": bool(quota.metadata.get("activity_detected")),
+    }
+    if quota.window != "5h":
+        return {**decision, "action": "ignore", "reason": "not a 5h warmup target"}
+
+    entry = state_bucket(state, quota, reset_drop_fraction)
+    if quota.used_fraction is None and not decision["activity_detected"]:
+        return {**decision, "action": "skip", "reason": "quota usage is unknown"}
+    if quota.used_fraction is not None and quota.used_fraction > threshold:
+        return {**decision, "action": "skip", "reason": "5h window already started (reported usage)"}
+    if decision["activity_detected"]:
+        return {**decision, "action": "skip", "reason": "5h window already started (exact activity)"}
+    if hold_is_active(entry):
+        return {**decision, "action": "skip", "reason": "previous attempt is still held", "hold_until": entry.get("hold_until")}
+    return {**decision, "action": "warm", "reason": "5h quota window is not started"}
+
+
 def due_quotas(state: dict[str, Any], quotas: Sequence[Quota], threshold: float, reset_drop_fraction: float) -> list[Quota]:
-    result: list[Quota] = []
-    for quota in quotas:
-        if quota.window != "5h":
-            continue
-        entry = state_bucket(state, quota, reset_drop_fraction)
-        activity_detected = bool(quota.metadata.get("activity_detected"))
-        percentage_detected = quota.used_fraction is not None and quota.used_fraction > threshold
-        window_started = percentage_detected or activity_detected
-        if not window_started and not hold_is_active(entry):
-            result.append(quota)
-    return result
+    return [quota for quota in quotas if quota_decision(state, quota, threshold, reset_drop_fraction)["action"] == "warm"]
 
 
 def mark_group_attempted(state: dict[str, Any], quotas: Sequence[Quota], target: WarmTarget) -> None:
@@ -1159,7 +1177,11 @@ def release_run_lock(handle) -> None:
 
 
 def format_percent(value: float | None) -> str:
-    return "unknown" if value is None else f"{value * 100:.1f}%"
+    if value is None:
+        return "unknown"
+    if 0 < value < 0.001:
+        return "<0.1%"
+    return f"{value * 100:.1f}%"
 
 
 def print_status(statuses: Sequence[ProviderStatus], as_json: bool = False) -> None:
@@ -1173,6 +1195,69 @@ def print_status(statuses: Sequence[ProviderStatus], as_json: bool = False) -> N
         for quota in status.quotas:
             reset = f" reset={quota.reset_time}" if quota.reset_time else ""
             print(f"  {quota.group}/{quota.window}: used={format_percent(quota.used_fraction)} remaining={format_percent(quota.remaining_fraction)}{reset}")
+
+
+def compact_statuses(statuses: Sequence[ProviderStatus]) -> list[dict[str, Any]]:
+    return [
+        {
+            "provider": status.provider,
+            "available": status.available,
+            "error": status.error,
+            "quotas": [
+                {
+                    "quota_id": quota.quota_id,
+                    "group": quota.group,
+                    "window": quota.window,
+                    "used_fraction": quota.used_fraction,
+                    "reset_time": quota.reset_time,
+                    "activity_detected": bool(quota.metadata.get("activity_detected")),
+                }
+                for quota in status.quotas
+            ],
+        }
+        for status in statuses
+    ]
+
+
+def read_log_entries(path: Path, last: int) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    entries: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            entries.append(value)
+    return entries[-last:]
+
+
+def print_log_entries(entries: Sequence[Mapping[str, Any]], as_json: bool = False) -> None:
+    if as_json:
+        print(json.dumps(list(entries), indent=2))
+        return
+    if not entries:
+        print("No scheduled run logs found.")
+        return
+    for entry in entries:
+        outcomes = entry.get("outcomes", [])
+        event = entry.get("event")
+        if event:
+            print(f"{entry.get('at', 'unknown time')} — {event}: {entry.get('reason') or entry.get('error') or ''}".rstrip())
+            continue
+        sent = sum(1 for outcome in outcomes if outcome.get("success")) if isinstance(outcomes, list) else 0
+        failed = sum(1 for outcome in outcomes if not outcome.get("success")) if isinstance(outcomes, list) else 0
+        summary = "no warmup sent" if not sent and not failed else f"warmups sent={sent}, failed={failed}"
+        print(f"{entry.get('at', 'unknown time')} — {summary}")
+        decisions = entry.get("decisions")
+        if isinstance(decisions, list):
+            for decision in decisions:
+                reset = f", reset={decision['reset_time']}" if decision.get("reset_time") else ""
+                hold = f", hold_until={decision['hold_until']}" if decision.get("hold_until") else ""
+                print(f"  {decision.get('provider')}/{decision.get('group')}/{decision.get('window')}: used={format_percent(decision.get('used_fraction'))}, {decision.get('action')} — {decision.get('reason')}{reset}{hold}")
+        else:
+            print("  legacy entry; detailed decisions were not recorded")
 
 
 def run_once(
@@ -1195,13 +1280,17 @@ def run_once(
     providers = build_providers(config, provider_names)
     provider_by_name = {provider.name: provider for provider in providers}
     targets: list[WarmTarget] = []
+    decisions: list[dict[str, Any]] = []
 
     for provider in providers:
         status = provider.status()
         statuses.append(status)
         if status.available:
             due = due_quotas(state, status.quotas, threshold, reset_drop)
+            decisions.extend(quota_decision(state, quota, threshold, reset_drop) for quota in status.quotas)
             targets.extend(provider.targets(status, due))
+        else:
+            decisions.append({"provider": provider.name, "action": "skip", "reason": status.error or "provider unavailable"})
         if provider.name in force_providers:
             if provider.name == "codex":
                 model, effort = provider.choose_model()  # type: ignore[attr-defined]
@@ -1243,7 +1332,7 @@ def run_once(
 
     state["last_run_at"] = utc_iso()
     save_json_file(state_path, state)
-    append_jsonl(log_path, {"at": utc_iso(), "mode": "live", "outcomes": outcomes, "statuses": [status.to_dict() for status in statuses]})
+    append_jsonl(log_path, {"at": utc_iso(), "mode": "live", "decisions": decisions, "outcomes": outcomes, "statuses": compact_statuses(statuses)})
     output = {"mode": "live", "statuses": [status.to_dict() for status in statuses], "outcomes": outcomes}
     if as_json:
         print(json.dumps(output, indent=2))
@@ -1290,7 +1379,11 @@ def parser() -> argparse.ArgumentParser:
 
     install = subparsers.add_parser("install-task", help="Explicitly register a Windows Task Scheduler task")
     install.add_argument("--name", default="Quota Warmup")
-    install.add_argument("--every-minutes", type=int, default=15)
+    install.add_argument("--every-minutes", type=int, default=60)
+
+    logs = subparsers.add_parser("logs", help="Show recent scheduled live-run decisions")
+    logs.add_argument("--last", type=int, default=20)
+    logs.add_argument("--json", action="store_true", dest="as_json")
 
     remove = subparsers.add_parser("remove-task", help="Explicitly remove a Windows Task Scheduler task")
     remove.add_argument("--name", default="Quota Warmup")
@@ -1317,6 +1410,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             return result.returncode
         print(f"Removed Task Scheduler task {args.name!r}.")
         return 0
+    if args.command == "logs":
+        if args.last < 1:
+            print("--last must be at least 1", file=sys.stderr)
+            return 2
+        print_log_entries(read_log_entries(args.log, args.last), args.as_json)
+        return 0
 
     config = load_config(args.config)
     provider_names = getattr(args, "provider", None)
@@ -1330,10 +1429,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_once(config, provider_names, args.state, args.log, False, args.as_json, args.force_provider)
         lock = acquire_run_lock(args.state.with_suffix(args.state.suffix + ".lock"))
         if lock is None:
+            append_jsonl(args.log, {"at": utc_iso(), "mode": "live", "event": "skipped", "reason": "another run is already active"})
             print("Another quota-warmup run is already active; skipping this run.")
             return 0
         try:
-            return run_once(config, provider_names, args.state, args.log, True, args.as_json, args.force_provider)
+            try:
+                return run_once(config, provider_names, args.state, args.log, True, args.as_json, args.force_provider)
+            except Exception as exc:
+                append_jsonl(args.log, {"at": utc_iso(), "mode": "live", "event": "failed", "error": f"{type(exc).__name__}: {exc}"})
+                print(f"Quota warmup failed: {exc}", file=sys.stderr)
+                return 1
         finally:
             release_run_lock(lock)
     return 2
