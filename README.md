@@ -15,11 +15,11 @@ Task Scheduler registration is a separate explicit command and has not been perf
 
 The policy is:
 
-1. A quota is eligible when its reported usage is greater than zero or the provider exposes exact current-window activity despite a rounded `0%` display.
-2. Antigravity uses its fractional usage, GLM uses its five-hour model-call/token feed, and Codex supplements rounded account percentages with local thread activity aligned to the provider's reset boundary.
-3. Each quota window is attempted at most once per observed window. Attempt state is written before the request, preventing retries after ambiguous timeouts.
-4. A successful warmup marks all currently observed windows in the same provider/model group, because one request consumes the applicable group's windows together.
-5. Reset state is cleared only when the provider window changes, usage drops as part of a reset, or exact current-window activity expires.
+1. The warmup target is specifically an unstarted `5h` model window. Weekly usage does not trigger a request.
+2. A `5h` window is considered started when its reported usage is greater than zero or an exact activity signal shows usage despite a rounded `0%` display.
+3. When the `5h` window is still at zero with no activity, the tool sends one request on the lowest configured model and effort for that model group.
+4. The attempt is recorded before sending and held for five hours, so a tiny request that still displays as `0%`, an ambiguous timeout, or overlapping scheduler run cannot cause repeated requests.
+5. Antigravity uses fractional usage, GLM uses its five-hour model-call/token feed, and Codex supplements rounded account percentages with local thread activity aligned to the provider's reset boundary.
 6. Unknown quota status never causes an automatic live request, and a single-instance lock prevents overlapping live runs.
 
 Antigravity currently reports two windows per model group: `weekly` and `5h`. The tool keeps those as separate state keys. It chooses the lowest configured available model and effort in each group: normally Gemini Flash Low for Gemini, and GPT-OSS Medium for the Claude/GPT group because that is the lowest advertised option in that group. If the installed CLI reports a different catalog, selection falls back to the lowest-ranked discovered model.

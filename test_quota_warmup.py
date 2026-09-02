@@ -80,10 +80,18 @@ class ParsingTests(unittest.TestCase):
 
 
 class StateTests(unittest.TestCase):
-    def test_exact_activity_triggers_even_when_percentage_rounds_to_zero(self):
+    def test_exact_activity_means_rounded_zero_window_is_already_started(self):
         quota = Quota("test", "test:5h", "test", "5h", 1.0, metadata={"activity_detected": True})
         state = {"buckets": {}}
-        self.assertEqual(due_quotas(state, [quota], 0.0, 0.02), [quota])
+        self.assertEqual(due_quotas(state, [quota], 0.0, 0.02), [])
+
+    def test_zero_five_hour_window_is_due(self):
+        quota = Quota("test", "test:5h", "test", "5h", 1.0)
+        self.assertEqual(due_quotas({"buckets": {}}, [quota], 0.0, 0.02), [quota])
+
+    def test_zero_weekly_window_is_not_a_warmup_target(self):
+        quota = Quota("test", "test:weekly", "test", "weekly", 1.0)
+        self.assertEqual(due_quotas({"buckets": {}}, [quota], 0.0, 0.02), [])
 
     def test_exact_activity_does_not_clear_kicked_state_at_zero_percent(self):
         quota = Quota("test", "test:5h", "test", "5h", 1.0, metadata={"activity_detected": True})
@@ -92,8 +100,8 @@ class StateTests(unittest.TestCase):
         self.assertTrue(entry["kicked"])
 
     def test_attempted_window_is_not_retried(self):
-        quota = Quota("test", "test:5h", "test", "5h", 0.99)
-        state = {"buckets": {"test:5h": {"attempted": True, "kicked": False, "last_used_fraction": 0.01}}}
+        quota = Quota("test", "test:5h", "test", "5h", 1.0)
+        state = {"buckets": {"test:5h": {"attempted": True, "kicked": False, "last_used_fraction": 0.0, "hold_until": "2999-01-01T00:00:00Z"}}}
         self.assertEqual(due_quotas(state, [quota], 0.0, 0.02), [])
 
     def test_activity_cutoff_uses_provider_window_boundary(self):

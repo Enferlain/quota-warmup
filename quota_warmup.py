@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 PROJECT_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = PROJECT_DIR / "config.json"
 DEFAULT_STATE = PROJECT_DIR / "state.json"
@@ -437,8 +437,7 @@ class AntigravityProvider(Provider):
             model, effort = self.choose_model(group, models)
             if not model or not effort:
                 continue
-            windows = ", ".join(sorted({quota.window for quota in group_due}))
-            targets.append(WarmTarget(self.name, group, model, effort, [quota.quota_id for quota in group_due], f"used quota window(s): {windows}"))
+            targets.append(WarmTarget(self.name, group, model, effort, [quota.quota_id for quota in group_due], "5h quota window is not started"))
         return targets
 
     def warm(self, target: WarmTarget) -> dict[str, Any]:
@@ -740,8 +739,7 @@ class CodexProvider(Provider):
         if not due:
             return []
         model, effort = self.choose_model()
-        windows = ", ".join(sorted({quota.window for quota in due}))
-        return [WarmTarget(self.name, "codex", model, effort, [quota.quota_id for quota in due], f"used quota window(s): {windows}")]
+        return [WarmTarget(self.name, "codex", model, effort, [quota.quota_id for quota in due], "5h quota window is not started")]
 
     def warm(self, target: WarmTarget) -> dict[str, Any]:
         timeout = float(self.config.get("warm_timeout_seconds", 180))
@@ -963,8 +961,7 @@ class GLMProvider(Provider):
             return []
         model = str(self.config.get("model", "glm-5.3-flash"))
         effort = str(self.config.get("reasoning_effort", "low"))
-        windows = ", ".join(sorted({quota.window for quota in due}))
-        return [WarmTarget(self.name, "glm", model, effort, [quota.quota_id for quota in due], f"used quota window(s): {windows}")]
+        return [WarmTarget(self.name, "glm", model, effort, [quota.quota_id for quota in due], "5h quota window is not started")]
 
     def warm(self, target: WarmTarget) -> dict[str, Any]:
         key, _ = self.api_key()
@@ -1047,24 +1044,45 @@ def load_config(path: Path) -> dict[str, Any]:
     return config
 
 
+def hold_is_active(entry: Mapping[str, Any], now: datetime | None = None) -> bool:
+    value = entry.get("hold_until")
+    if not value:
+        return False
+    try:
+        until = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return until > (now or utc_now())
+    except ValueError:
+        return False
+
+
+def quota_hold_minutes(quota: Quota) -> int:
+    configured = int(quota.metadata.get("window_duration_mins", 0) or 0)
+    if configured > 0:
+        return configured
+    match = re.fullmatch(r"(\d+)h", quota.window.lower())
+    return int(match.group(1)) * 60 if match else 0
+
+
 def state_bucket(state: dict[str, Any], quota: Quota, reset_drop_fraction: float) -> dict[str, Any]:
     buckets = state.setdefault("buckets", {})
     entry = buckets.setdefault(quota.quota_id, {})
     old_reset = entry.get("reset_time")
     old_used = entry.get("last_used_fraction")
-    reset_detected = bool(old_reset and quota.reset_time and old_reset != quota.reset_time)
+    hold_active = hold_is_active(entry)
+    reset_detected = bool(old_reset and quota.reset_time and old_reset != quota.reset_time and not hold_active)
     if old_used is not None and quota.used_fraction is not None:
         try:
-            reset_detected = reset_detected or quota.used_fraction + reset_drop_fraction < float(old_used)
+            reset_detected = reset_detected or (not hold_active and quota.used_fraction + reset_drop_fraction < float(old_used))
         except (TypeError, ValueError):
             pass
-    if quota.used_fraction is not None and quota.used_fraction <= 0 and not bool(quota.metadata.get("activity_detected")):
+    if quota.used_fraction is not None and quota.used_fraction <= 0 and not bool(quota.metadata.get("activity_detected")) and not hold_active:
         reset_detected = True
     if reset_detected:
         entry["kicked"] = False
         entry["last_kicked_at"] = None
         entry["attempted"] = False
         entry["last_attempt_at"] = None
+        entry["hold_until"] = None
     entry.update(
         {
             "provider": quota.provider,
@@ -1082,27 +1100,33 @@ def state_bucket(state: dict[str, Any], quota: Quota, reset_drop_fraction: float
 def due_quotas(state: dict[str, Any], quotas: Sequence[Quota], threshold: float, reset_drop_fraction: float) -> list[Quota]:
     result: list[Quota] = []
     for quota in quotas:
+        if quota.window != "5h":
+            continue
         entry = state_bucket(state, quota, reset_drop_fraction)
         activity_detected = bool(quota.metadata.get("activity_detected"))
         percentage_detected = quota.used_fraction is not None and quota.used_fraction > threshold
-        if (percentage_detected or activity_detected) and not entry.get("kicked", False) and not entry.get("attempted", False):
+        window_started = percentage_detected or activity_detected
+        if not window_started and not hold_is_active(entry):
             result.append(quota)
     return result
 
 
 def mark_group_attempted(state: dict[str, Any], quotas: Sequence[Quota], target: WarmTarget) -> None:
-    now = utc_iso()
+    now_value = utc_now()
+    now = utc_iso(now_value)
     for quota in quotas:
-        if quota.quota_id not in target.quota_ids and quota.group != target.group:
+        if target.quota_ids and quota.quota_id not in target.quota_ids:
             continue
         entry = state_bucket(state, quota, 0.0)
-        entry.update({"attempted": True, "last_attempt_at": now, "last_attempted_model": target.model, "last_attempted_effort": target.effort})
+        hold_minutes = quota_hold_minutes(quota)
+        hold_until = utc_iso(now_value + timedelta(minutes=hold_minutes)) if hold_minutes > 0 else None
+        entry.update({"attempted": True, "last_attempt_at": now, "hold_until": hold_until, "last_attempted_model": target.model, "last_attempted_effort": target.effort})
 
 
 def mark_group_kicked(state: dict[str, Any], quotas: Sequence[Quota], target: WarmTarget) -> None:
     now = utc_iso()
     for quota in quotas:
-        if quota.quota_id not in target.quota_ids and quota.group != target.group:
+        if target.quota_ids and quota.quota_id not in target.quota_ids:
             continue
         entry = state_bucket(state, quota, 0.0)
         entry.update({"attempted": True, "kicked": True, "last_kicked_at": now, "last_kicked_model": target.model, "last_kicked_effort": target.effort})
@@ -1203,7 +1227,7 @@ def run_once(
         if provider is None:
             outcomes.append({"target": target.to_dict(), "success": False, "error": "provider unavailable"})
             continue
-        matching_quotas = [quota for status in statuses for quota in status.quotas if quota.provider == target.provider and (not target.quota_ids or quota.quota_id in target.quota_ids or quota.group == target.group)]
+        matching_quotas = [quota for status in statuses for quota in status.quotas if quota.provider == target.provider and (quota.quota_id in target.quota_ids if target.quota_ids else quota.group == target.group)]
         mark_group_attempted(state, matching_quotas, target)
         state["last_run_at"] = utc_iso()
         save_json_file(state_path, state)
