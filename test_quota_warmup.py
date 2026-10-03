@@ -2,12 +2,18 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
+
+import quota_warmup
 
 from quota_warmup import (
     AntigravityProvider,
+    CodexProvider,
     Quota,
+    WarmTarget,
     activity_cutoff_ms,
     background_python_executable,
+    clear_group_hold,
     parse_antigravity_usage,
     parse_codex_rate_limits,
     parse_glm_quotas,
@@ -118,9 +124,42 @@ class ParsingTests(unittest.TestCase):
 
 class StateTests(unittest.TestCase):
     def test_exact_activity_means_rounded_zero_window_is_already_started(self):
-        quota = Quota("test", "test:5h", "test", "5h", 1.0, metadata={"activity_detected": True})
+        quota = Quota("test", "test:5h", "test", "5h", 1.0, "2026-10-03T02:59:02Z", metadata={"activity_detected": True})
         state = {"buckets": {}}
         self.assertEqual(due_quotas(state, [quota], 0.0, 0.02), [])
+
+    def test_exact_activity_with_no_reset_time_still_warms(self):
+        quota = Quota("test", "test:5h", "test", "5h", 1.0, None, metadata={"activity_detected": True})
+        self.assertEqual(due_quotas({"buckets": {}}, [quota], 0.0, 0.02), [quota])
+
+    def test_failed_attempt_clears_hold_for_retry(self):
+        quota = Quota("test", "test:5h", "test", "5h", 1.0)
+        target = WarmTarget("test", "test", "some-model", "low", ["test:5h"], "test")
+        state = {"buckets": {"test:5h": {"attempted": True, "kicked": False, "hold_until": "2999-01-01T00:00:00Z"}}}
+        clear_group_hold(state, [quota], target)
+        entry = state["buckets"]["test:5h"]
+        self.assertFalse(entry["attempted"])
+        self.assertIsNone(entry["hold_until"])
+
+    def test_codex_warm_command_omits_removed_approval_flag(self):
+        provider = CodexProvider({})
+        target = WarmTarget("codex", "codex", "gpt-5.6-luna", "low", ["codex:codex:primary"], "test")
+        captured = {}
+
+        class FakeResult:
+            returncode = 0
+            stdout = "{}"
+            stderr = ""
+
+        def fake_run_command(command, *args, **kwargs):
+            captured["command"] = list(command)
+            return FakeResult()
+
+        with mock.patch.object(quota_warmup, "run_command", fake_run_command):
+            provider.warm(target)
+        self.assertNotIn("--ask-for-approval", captured["command"])
+        self.assertIn("--ephemeral", captured["command"])
+        self.assertIn("--sandbox", captured["command"])
 
     def test_zero_five_hour_window_is_due(self):
         quota = Quota("test", "test:5h", "test", "5h", 1.0)

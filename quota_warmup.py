@@ -784,8 +784,6 @@ class CodexProvider(Provider):
             "--skip-git-repo-check",
             "--sandbox",
             "read-only",
-            "--ask-for-approval",
-            "never",
             "--model",
             target.model,
             "-c",
@@ -1152,7 +1150,8 @@ def quota_decision(state: dict[str, Any], quota: Quota, threshold: float, reset_
         return {**decision, "action": "skip", "reason": "quota usage is unknown"}
     if quota.used_fraction is not None and quota.used_fraction > threshold:
         return {**decision, "action": "skip", "reason": "5h window already started (reported usage)"}
-    if decision["activity_detected"]:
+    window_verified_unstarted = quota.used_fraction is not None and quota.used_fraction <= 0 and quota.reset_time is None
+    if decision["activity_detected"] and not window_verified_unstarted:
         return {**decision, "action": "skip", "reason": "5h window already started (exact activity)"}
     if hold_is_active(entry):
         return {**decision, "action": "skip", "reason": "previous attempt is still held", "hold_until": entry.get("hold_until")}
@@ -1182,6 +1181,14 @@ def mark_group_kicked(state: dict[str, Any], quotas: Sequence[Quota], target: Wa
             continue
         entry = state_bucket(state, quota, 0.0)
         entry.update({"attempted": True, "kicked": True, "last_kicked_at": now, "last_kicked_model": target.model, "last_kicked_effort": target.effort})
+
+
+def clear_group_hold(state: dict[str, Any], quotas: Sequence[Quota], target: WarmTarget) -> None:
+    for quota in quotas:
+        if target.quota_ids and quota.quota_id not in target.quota_ids:
+            continue
+        entry = state_bucket(state, quota, 0.0)
+        entry.update({"attempted": False, "hold_until": None})
 
 
 def acquire_run_lock(path: Path):
@@ -1359,6 +1366,7 @@ def run_once(
             mark_group_kicked(state, matching_quotas, target)
             outcomes.append({"target": target.to_dict(), "success": True, "result": result})
         except RuntimeError as exc:
+            clear_group_hold(state, matching_quotas, target)
             outcomes.append({"target": target.to_dict(), "success": False, "error": str(exc)})
 
     state["last_run_at"] = utc_iso()
